@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<style>
+
+body {
+  font: 10px sans-serif;
+}
+
+
+
+</style>
+<body>
+<script src="https://d3js.org/d3.v3.min.js"></script>
+<script src="https://d3js.org/d3-polygon.v1.min.js"></script>
+<script src="https://d3js.org/d3-queue.v3.min.js"></script>
+<script src="d3.geom.concaveHull.js" charset="utf-8" type="text/javascript"></script>
+<script>
+
+    
+/*
+Standard margin stuff. The only real trick here to keep in mind is to keep the 
+map size itself square. As it is currently, the width and height are both 950 px
+The top and right margins are used for title and description
+*/
+var margin = {top: 110, right: 600, bottom: 20, left: 50},
+    width = 1600 - margin.left - margin.right,
+    height = 1080 - margin.top - margin.bottom;
+
+
+/* Sets up the SVG with full width and height, and adds a rectangle for a slightly off-white background */
+var svg = d3.select("body").append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom);
+svg.append("rect")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom)
+    .style("fill", "#fbfbfb")
+    .style("stroke-width", "0.9px")
+    .style("stroke", "#a0a0a0");
+svg = svg.append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+    
+var x_scale = d3.scale.linear()
+    .range([0, width]);
+
+var y_scale = d3.scale.linear()
+    .range([height, 0]);
+
+/* Color range - the range goes from light yellowish green to dark blue-green
+This is used in combination with the number of systems controlled, as well as 
+some opacity settings for the faction areas. Smaller faction will be higher opacity 
+but lighter colors, larger factions will have darker colors but more transparent */
+var color = d3.scale.linear().domain([2,42])
+      .interpolate(d3.interpolateHcl)
+      .range([d3.rgb("#66ff33"), d3.rgb('#339966')]);
+
+/* need two data files rather than one. Both of these come from eddb.io/api */    
+d3.queue()
+    .defer(d3.json, 'systems_populated.json')
+    .defer(d3.json, 'factions.json')
+    .await(makeMap);
+    
+/* This function makes the entire map, after both files are loaded */
+function makeMap(error, systems, factions){
+    /* filter both data sets on Alliance only */
+    var all_systems = systems.filter(function(d){ return d.allegiance_id === 1;});
+    var all_factions = factions.filter(function(d){ return d.allegiance_id === 1;});
+    all_systems = all_systems.filter(function(d){return d.y > -100});  // remove Pleiades and California systems
+    
+    //sort by faction name
+    all_systems.sort(function(a, b){
+        return a.controlling_minor_faction_id - b.controlling_minor_faction_id;
+    });
+    
+    /* Here's a little math to ensure that we keep the aspect ratio of x and y values. We make sure that the scales are set 
+    right for both x and y. The "width" and "length" between each side need to be the same to avoid skewing/stretching. So 
+    we figure out a scale factor */
+    var xmin = d3.min(all_systems, function(d){  return +d.x; });
+    var xmax = d3.max(all_systems, function(d){  return +d.x; });
+    var ymin = d3.min(all_systems, function(d){  return +d.y; });
+    var ymax = d3.max(all_systems, function(d){  return +d.y; });
+    var scalefactor = (ymax-ymin)/(xmax-xmin);
+    //console.log(xmin*scalefactor, xmax*scalefactor, (xmax*scalefactor)-(xmin*scalefactor), ymin, ymax, ymax-ymin);
+    x_scale.domain([xmin*scalefactor,xmax*scalefactor]);
+    y_scale.domain([ymin, ymax]);
+    
+    /* Data set combination. Systems has the system info, including coordinate
+    Factions only has systems they are present in (and influence, not relevant here).
+    Therefore, we need to combine the sets.
+    Since we are using the faction info for colors, etc later, we simply add the system details for a particular 
+    faction directly into the faction data set. That is, the systems array from systems are added to the faction
+    */
+    all_factions.forEach(function(faction){
+        var syss = all_systems.filter(function(sys){
+            return sys.controlling_minor_faction_id === faction.id;
+        });
+        faction.systems = syss;
+    });
+    /* There are factions that don't own any systems. Since we're not going to show those anyway, 
+    simply remove all factions that don't control systems */
+    all_factions = all_factions.filter(function(d){
+        return d.systems.length > 0;
+    })
+    //console.log(all_factions );   
+    //console.log(all_systems );  
+    
+    var a_sys = svg.selectAll("system");
+    var a_fac = svg.selectAll("factionarea");
+    /* See at the top. This is a special library included in this visualization. Make sure you link the relevant script file
+    What this allows us to do is draw the faction areas without them getting too "blobby" (look at the default convex hull
+    in d3.js to see the difference). This allows us to follow the outline of a faction shape more closely. The distance of
+    82 works well for this data set, but you may need to tweak it if it looks weird */
+    var concaveHull = d3.geom.concaveHull().distance(82);
+    
+    /* map drawing  --- not, two similar "forEach" segments. Note that they are only separated for z-reasons. The way d3.js 
+    works is that shapes are drawn on top of each other, so if you want it on top, you have to add it later. This first one 
+    is for the faction area maps. Those will be at the "bottom"
+    Factions controlling 3 or more systems get their area marked out.
+    */
+    all_factions.forEach(function(faction){
+        var numsystems = faction.systems.length;
+        var faction_color = color(numsystems);
+        if(numsystems > 2){
+            var area_verts = [];
+            faction.systems.forEach(function(s){
+                area_verts.push([x_scale(s.x), y_scale(s.y)]);
+            });
+            var farea = svg.append("g")
+                .attr("class", "factionarea")
+                .attr("transform", "translate(0,0)");
+                farea.selectAll("path")
+                    .data(concaveHull(area_verts))
+                    .enter().append("path")
+                    .attr("d", function(d) { return "M" + d.join("L") + "Z"; })
+                    .style("fill-opacity", 0.5 - numsystems/120)
+                    .style("fill", faction_color)
+                    .style("stroke", "#C0FFC0")
+                    .style("stroke-width", "1px")
+                    .style("stroke-opacity", "0.2");
+
+        }
+
+    });
+    /* Adds faction labels and Alliance controlled systems
+    1. we find the centroid of the coordinates of the various systems controlled, and place the text there
+    (note this will work better for some than others). Font size scales with number of systems controlled
+    2. Adds the systems. Note that systems controlled by larger factions will be more opaque than smaller factions.
+    */
+    all_factions.forEach(function(faction){
+        var numsystems = faction.systems.length;
+        var faction_color = color(numsystems);
+        if(numsystems > 2){
+            var area_verts = [];
+            faction.systems.forEach(function(s){
+                area_verts.push([x_scale(s.x), y_scale(s.y)]);
+            });
+            
+            
+            if(numsystems > 4){
+                var centroid = d3.polygonCentroid(area_verts);
+                var farea = svg.append("g")
+                    .attr("transform", "translate(" + centroid[0] + "," + centroid[1] + ")")
+                    .append("text")
+                    .attr("class", "factionlabel")
+                    .attr("dy", "1.25em")
+                    .attr("text-anchor", "middle")
+                    .text(faction.name)
+                    .style("opacity", 0.6 -(numsystems/100))
+                    .style("font-size", parseInt(numsystems/2 + 7));
+            }  
+        }
+        
+        var gsys = a_sys.data(faction.systems).enter()
+        .append("g")
+            .attr("class", "system")
+            .attr("transform", function(d){ return "translate(" + x_scale(+d.x) + "," + y_scale(+d.y) +  ")"} );
+        gsys.append("circle")
+            .attr("class", "star")
+            .attr("r", "2.5")
+            .style("fill", "#004000")
+            .style("opacity", 0.6 + numsystems/160);
+        
+    });
+        
+    
+    //Add a couple of named systems for orientation on the map
+    var landmarks = [
+        {name: "Lave", x: "75.75", y: "48.75", color: "green", r: "6", px: "12px"},
+        {name: "Alioth", x: "-33.65625", y: "72.46875 ", color: "green", r: "8", px: "14px"},
+        {name: "Sol", x: "0.0", y: "0.0", color: "red", r: "6", px: "12px"},
+        {name: "Gateway", x: "-11", y: "77.84375", color: "green", r: "6", px: "12px"},
+        {name: "Shinrarta Dezhra", x: "55.71875", y: "17.59375", color: "gold", r: "6", px: "12px"},
+        {name: "58 Epsilon Herculis", x: "-100.3125", y: "90.5625", color: "green", r: "6", px: "12px"},
+        {name: "Wolf 406", x: "41.0625", y: "74.125 ", color: "green", r: "6", px: "12px"},
+        {name: "Udegoci", x: "-70", y: "51.71875", color: "green", r: "6", px: "12px"},
+        {name: "LHS 2541", x: "29.8125", y: "63.96875 ", color: "green", r: "6", px: "12px"},
+        {name: "Varramool", x: "8", y: "160.375 ", color: "green", r: "6", px: "12px"},
+        {name: "Polahukuna", x: "59.6875", y: "84.5", color: "green", r: "6", px: "12px"},
+        {name: "Para Indra", x: "-2.15625", y: "107.34375", color: "green", r: "6", px: "12px"},
+        {name: "Wolf 510", x: "4.21875", y: "130.6875", color: "green", r: "6", px: "12px"},
+        {name: "LHS 2637", x: "-22.5625", y: "74.6875", color: "green", r: "6", px: "12px"}
+        
+    ];
+    /* this just creates the landmark systems with their label based on the list above. Note that Alioth has larger text and circle radius */
+    var marks = svg.selectAll("landmark").data(landmarks).enter()
+        .append("g")
+        .attr("class", "landmark")
+        .attr("transform", function(d){ return "translate(" + x_scale(+d.x) + "," + y_scale(+d.y) +  ")"} );
+    marks.append("circle")
+        .attr("class", "landmarkstar")
+        .attr("r", function(d){ return d.r;})
+        .style("fill", function(d){ return d.color;})
+        .style("stroke", "white")
+        .style("stroke-width", "0.8px")
+        .style("opacity", "0.8");
+    marks.append("text")
+        .attr("class", "factionlabel")
+        .attr("dy", "1.5em")
+        .attr("text-anchor", "middle")
+        .text(function(d){return d.name;})
+        .style("stroke", "white")
+        .style("stroke-width", "1.1px")
+        .style("font-weight", "bold")
+        .style("opacity", "0.8")
+        .style("font-size", function(d){ return d.px;});
+     marks.append("text")
+        .attr("class", "factionlabel")
+        .attr("dy", "1.5em")
+        .attr("text-anchor", "middle")
+        .text(function(d){return d.name;})
+        .style("stroke-width", "1.0px")
+        .style("font-weight", "bold")
+        .style("opacity", "0.7")
+        .style("font-size", function(d){ return d.px;});
+    
+    
+    //titles and description
+    /* SVG/d3.js doesn't do any automatic wordwrap, so you have to do it yourself... */
+    var desc = [
+        "This maps shows all systems controlled by Alliance",
+        "factions. Factions that control three systems or ",
+        "more have their area marked out. Factions that control",
+        "five systems or more, have their name included. The ",
+        "name of the faction scales with its size.",
+        " ",
+        "A number of landmark systems are included for",
+        "orientation. This includes the home systems of the",
+        "major Alliance factions. Up is top of the map. Sag A*",
+        "is straight ahead.",
+        " ",
+        "Source: eddb.io/api"
+    ];
+    var titles = d3.select("svg");
+    titles.append("g")
+        .attr("transform", "translate(30,25)")
+        .append("text")
+        .attr("class", "title")
+        .attr("dy", "0.6em")
+        .attr("text-anchor", "start")
+        .text("Area controlled by the Alliance of Independent Systems")
+        .style("font-size", "54px")
+        .style("opacity", "0.9")
+        .style("font-weight", "bold");
+    
+    titles.append("g")
+        .attr("transform", "translate(30,82)")
+        .append("text")
+        .attr("class", "subtitle")
+        .attr("dy", "0.5em")
+        .attr("text-anchor", "start")
+        .text("Systems controlled by Alliance factions and areas of space governed by the major Alliance factions")
+        .style("font-size", "32px")
+        .style("opacity", "0.9")
+        .style("font-weight", "normal")
+        .style("font-style", "italic");
+    
+    for(var i=0; i < desc.length; i++){
+        titles.append("g")
+            .attr("transform", "translate(1000," + parseInt((i*26)+200) + ")")
+            .append("text")
+            .attr("class", "subtitle")
+            .attr("dy", "0.5em")
+            .attr("text-anchor", "start")
+            .text(desc[i])
+            .style("font-size", "24px")
+            .style("opacity", "0.9");
+    }
+    
+    titles.append("g")
+        .attr("transform", "translate(1172,1060)")
+        .append("text")
+        .attr("class", "subtitle")
+        .attr("dy", "0.5em")
+        .attr("text-anchor", "start")
+        .text("Map created by CMDR Mangal Oemie, Alliance Elite Diplomatic Corps (AEDC)")
+        .style("font-size", "12px")
+        .style("opacity", "0.9")
+        .style("font-weight", "normal")
+        .style("font-style", "italic");
+    
+    /* this is how you can import an image file (not SVG) into your SVG */
+    titles.append("svg:image")
+    .attr('x', 1150)
+    .attr('y', 600)
+    .attr('width', 256)
+    .attr('height', 256)
+    .attr("xlink:href", "AllianceInsignia.png");
+            
+    
+    
+}
+
+
+</script>
